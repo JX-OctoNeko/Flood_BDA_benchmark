@@ -1,0 +1,61 @@
+# Basic configurations on XVIEW dataset
+
+
+# Data
+dataset: XVIEW
+num_workers: 2
+repeats: 2
+subset: val
+crop_size: 256
+
+
+# Optimizer
+optimizer: Adam
+lr: 0.002
+weight_decay: 0.0
+load_optim: False
+save_optim: False
+sched_on: True
+schedulers:
+  - name: StepLR
+    step_size: 30
+    gamma: 0.2
+
+
+# Training related
+batch_size: 24
+num_epochs: 200
+resume: ''
+anew: False
+device: cuda
+
+
+# Experiment
+exp_dir: ../exp/
+# tag: ''
+# suffix: ''
+# DO NOT specify exp_config
+debug_on: False
+inherit_off: False
+log_off: False
+track_intvl: 10
+tb_on: False
+tb_intvl: 500
+suffix_off: True
+save_on: False
+out_dir: ''
+
+
+# Criterion
+criterion: WBCE
+weights:
+  - 0.01   # Weight of background
+  - 0.1   # Weight of no-damage class
+  - 0.9    # Weight of minor-damage class
+  - 0.9    # Weight of major-damage class
+  - 0.9    # Weight of destroyed class
+
+
+# Model
+model: 
+out_type: logits2

@@ -123,3 +123,37 @@ def build_whu_eval_dataset(C):
         drop_last=False,
         pin_memory=C['device']!='cpu'
     )
+
+@DATA.register_func('XVIEW_train_dataset')
+def build_xview_train_dataset(C):
+    configs = get_common_train_configs(C)
+    configs.update(dict(
+        transforms=(Choose(
+            HorizontalFlip(), VerticalFlip(),
+            Rotate('90'), Rotate('180'), Rotate('270'),
+            Shift(),
+            Identity()), Normalize(np.asarray(C['mu']), np.asarray(C['sigma'])), None),
+        root=constants.IMDB_XVIEW,
+    ))
+
+    from data.xview import XVIEWDataset
+    return build_train_dataloader(XVIEWDataset, configs, C)
+
+
+@DATA.register_func('XVIEW_eval_dataset')
+def build_xview_eval_dataset(C):
+    configs = get_common_eval_configs(C)
+    configs.update(dict(
+        transforms=(None, Normalize(np.asarray(C['mu']), np.asarray(C['sigma'])), None),
+        root=constants.IMDB_XVIEW,
+    ))
+
+    from data.xview import XVIEWDataset
+    return DataLoader(
+        XVIEWDataset(**configs),
+        batch_size=C['batch_size'],
+        shuffle=False,
+        num_workers=C['num_workers'],
+        drop_last=False,
+        pin_memory=C['device']!='cpu'
+    )

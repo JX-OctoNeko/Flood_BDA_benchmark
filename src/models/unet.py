@@ -108,34 +108,143 @@ class UNet(nn.Module):
         x43 = self.do43(self.conv43(x42))
         x4p = self.pool4(x43)
 
+        # # simam place0
+        # b, c, h, w = x43.size()
+        # n = w * h - 1
+        # x_minus_mu_square = (x43 - x43.mean(dim=[2, 3], keepdim=True)).pow(2)
+        # y = x_minus_mu_square / (4 * (x_minus_mu_square.sum(dim=[2, 3], keepdim=True) / n + 1e-4)) + 0.5
+        # x43_am = nn.Sigmoid()(y)
+        # x43_attention = x43 * x43_am
+
         # Stage 4d
         x4d = self.upconv4(x4p)
-        pad4 = (0, x43.shape[3]-x4d.shape[3], 0, x43.shape[2]-x4d.shape[2])
-        x4d = torch.cat([F.pad(x4d, pad=pad4, mode='replicate'), x43], 1)
+        pad4 = (0, x43.shape[3] - x4d.shape[3], 0, x43.shape[2] - x4d.shape[2])
+        x4d = torch.cat([F.pad(x4d, pad=pad4, mode='replicate'), x43], 1) # 原x4d
+        # x4d = torch.cat([F.pad(x4d, pad=pad4, mode='replicate'), x43_attention], 1)
+
+        # # simam place1
+        # b, c, h, w = x4d.size()
+        # n = w * h - 1
+        # x_minus_mu_square = (x4d - x4d.mean(dim=[2, 3], keepdim=True)).pow(2)
+        # y = x_minus_mu_square / (4 * (x_minus_mu_square.sum(dim=[2, 3], keepdim=True) / n + 1e-4)) + 0.5
+        # x4d_am = nn.Sigmoid()(y)
+        # x4d = x4d * x4d_am
+
         x43d = self.do43d(self.conv43d(x4d))
+
+        # # simam place2
+        # b, c, h, w = x43d.size()
+        # n = w * h - 1
+        # x_minus_mu_square = (x43d - x43d.mean(dim=[2, 3], keepdim=True)).pow(2)
+        # y = x_minus_mu_square / (4 * (x_minus_mu_square.sum(dim=[2, 3], keepdim=True) / n + 1e-4)) + 0.5
+        # x43d_am = nn.Sigmoid()(y)
+        # x43d = x43d * x43d_am
+
         x42d = self.do42d(self.conv42d(x43d))
         x41d = self.do41d(self.conv41d(x42d))
 
+        # # simam place0
+        # b, c, h, w = x33.size()
+        # n = w * h - 1
+        # x_minus_mu_square = (x33 - x33.mean(dim=[2, 3], keepdim=True)).pow(2)
+        # y = x_minus_mu_square / (4 * (x_minus_mu_square.sum(dim=[2, 3], keepdim=True) / n + 1e-4)) + 0.5
+        # x33_am = nn.Sigmoid()(y)
+        # x33_attention = x33 * x33_am
+
         # Stage 3d
         x3d = self.upconv3(x41d)
-        pad3 = (0, x33.shape[3]-x3d.shape[3], 0, x33.shape[2]-x3d.shape[2])
-        x3d = torch.cat([F.pad(x3d, pad=pad3, mode='replicate'), x33], 1)
+        pad3 = (0, x33.shape[3] - x3d.shape[3], 0, x33.shape[2] - x3d.shape[2])
+        x3d = torch.cat([F.pad(x3d, pad=pad3, mode='replicate'), x33], 1) # origin x3d
+        # x3d = torch.cat([F.pad(x3d, pad=pad3, mode='replicate'), x33_attention], 1)
+
+        # # siamam place1 现在的实验采用的这个改进
+        # b, c, h, w = x3d.size()
+        # n = w * h - 1
+        # x_minus_mu_square = (x3d - x3d.mean(dim=[2, 3], keepdim=True)).pow(2)
+        # y = x_minus_mu_square / (4 * (x_minus_mu_square.sum(dim=[2, 3], keepdim=True) / n + 1e-4)) + 0.5
+        # x3d_am = nn.Sigmoid()(y)
+        # x3d = x3d * x3d_am
+
         x33d = self.do33d(self.conv33d(x3d))
+
+        # # simam place2
+        # b, c, h, w = x33d.size()
+        # n = w * h - 1
+        # x_minus_mu_square = (x33d - x33d.mean(dim=[2, 3], keepdim=True)).pow(2)
+        # y = x_minus_mu_square / (4 * (x_minus_mu_square.sum(dim=[2, 3], keepdim=True) / n + 1e-4)) + 0.5
+        # x33d_am = nn.Sigmoid()(y)
+        # x33d = x33d * x33d_am
+
         x32d = self.do32d(self.conv32d(x33d))
         x31d = self.do31d(self.conv31d(x32d))
 
+        # # simam place0
+        # b, c, h, w = x22.size()
+        # n = w * h - 1
+        # x_minus_mu_square = (x22 - x22.mean(dim=[2, 3], keepdim=True)).pow(2)
+        # y = x_minus_mu_square / (4 * (x_minus_mu_square.sum(dim=[2, 3], keepdim=True) / n + 1e-4)) + 0.5
+        # x22_am = nn.Sigmoid()(y)
+        # x22_attention = x22 * x22_am
+
         # Stage 2d
         x2d = self.upconv2(x31d)
-        pad2 = (0, x22.shape[3]-x2d.shape[3], 0, x22.shape[2]-x2d.shape[2])
-        x2d = torch.cat([F.pad(x2d, pad=pad2, mode='replicate'), x22], 1)
+        pad2 = (0, x22.shape[3] - x2d.shape[3], 0, x22.shape[2] - x2d.shape[2])
+        x2d = torch.cat([F.pad(x2d, pad=pad2, mode='replicate'), x22], 1) # origin x2d
+        # x2d = torch.cat([F.pad(x2d, pad=pad2, mode='replicate'), x22_attention], 1)
+
+        # # siamam place1
+        # b, c, h, w = x2d.size()
+        # n = w * h - 1
+        # x_minus_mu_square = (x2d - x2d.mean(dim=[2, 3], keepdim=True)).pow(2)
+        # y = x_minus_mu_square / (4 * (x_minus_mu_square.sum(dim=[2, 3], keepdim=True) / n + 1e-4)) + 0.5
+        # x2d_am = nn.Sigmoid()(y)
+        # x2d_am = x2d * x2d_am
+        # x2d = x2d * x2d_am
+
         x22d = self.do22d(self.conv22d(x2d))
+
+        # # simam place2
+        # b, c, h, w = x22d.size()
+        # n = w * h - 1
+        # x_minus_mu_square = (x22d - x22d.mean(dim=[2, 3], keepdim=True)).pow(2)
+        # y = x_minus_mu_square / (4 * (x_minus_mu_square.sum(dim=[2, 3], keepdim=True) / n + 1e-4)) + 0.5
+        # x22d_am = nn.Sigmoid()(y)
+        # x22d = x22d * x22d_am
+
         x21d = self.do21d(self.conv21d(x22d))
+
+        # # simam place0
+        # b, c, h, w = x12.size()
+        # n = w * h - 1
+        # x_minus_mu_square = (x12 - x12.mean(dim=[2, 3], keepdim=True)).pow(2)
+        # y = x_minus_mu_square / (4 * (x_minus_mu_square.sum(dim=[2, 3], keepdim=True) / n + 1e-4)) + 0.5
+        # x12_am = nn.Sigmoid()(y)
+        # x12_attention = x12 * x12_am
 
         # Stage 1d
         x1d = self.upconv1(x21d)
-        pad1 = (0, x12.shape[3]-x1d.shape[3], 0, x12.shape[2]-x1d.shape[2])
-        x1d = torch.cat([F.pad(x1d, pad=pad1, mode='replicate'), x12], 1)
+        pad1 = (0, x12.shape[3] - x1d.shape[3], 0, x12.shape[2] - x1d.shape[2])
+        x1d = torch.cat([F.pad(x1d, pad=pad1, mode='replicate'), x12], 1) # origin x1d
+        # x1d = torch.cat([F.pad(x1d, pad=pad1, mode='replicate'), x12_attention], 1)
+
+        # # siamam place1
+        # b, c, h, w = x1d.size()
+        # n = w * h - 1
+        # x_minus_mu_square = (x1d - x1d.mean(dim=[2, 3], keepdim=True)).pow(2)
+        # y = x_minus_mu_square / (4 * (x_minus_mu_square.sum(dim=[2, 3], keepdim=True) / n + 1e-4)) + 0.5
+        # x1d_am = nn.Sigmoid()(y)
+        # x1d = x1d * x1d_am
+
         x12d = self.do12d(self.conv12d(x1d))
+
+        # # simam place2
+        # b, c, h, w = x12d.size()
+        # n = w * h - 1
+        # x_minus_mu_square = (x12d - x12d.mean(dim=[2, 3], keepdim=True)).pow(2)
+        # y = x_minus_mu_square / (4 * (x_minus_mu_square.sum(dim=[2, 3], keepdim=True) / n + 1e-4)) + 0.5
+        # x12d_am = nn.Sigmoid()(y)
+        # x12d = x12d * x12d_am
+
         x11d = self.conv11d(x12d)
 
         return x11d

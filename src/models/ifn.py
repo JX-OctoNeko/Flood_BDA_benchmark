@@ -61,7 +61,7 @@ class DSIFN(nn.Module):
         self.o1_conv1 = conv2d_bn(1024, 512, use_dropout)
         self.o1_conv2 = conv2d_bn(512, 512, use_dropout)
         self.bn_sa1 = make_norm(512)
-        self.o1_conv3 = Conv1x1(512, 1)
+        self.o1_conv3 = Conv1x1(512, 5)
         self.trans_conv1 = nn.ConvTranspose2d(512, 512, kernel_size=2, stride=2)
 
         self.ca2 = ChannelAttention(in_ch=1536)
@@ -70,7 +70,7 @@ class DSIFN(nn.Module):
         self.o2_conv2 = conv2d_bn(512, 256, use_dropout)
         self.o2_conv3 = conv2d_bn(256, 256, use_dropout)
         self.bn_sa2 = make_norm(256)
-        self.o2_conv4 = Conv1x1(256, 1)
+        self.o2_conv4 = Conv1x1(256, 5)
         self.trans_conv2 = nn.ConvTranspose2d(256, 256, kernel_size=2, stride=2)
 
         self.ca3 = ChannelAttention(in_ch=768)
@@ -78,7 +78,7 @@ class DSIFN(nn.Module):
         self.o3_conv2 = conv2d_bn(256, 128, use_dropout)
         self.o3_conv3 = conv2d_bn(128, 128, use_dropout)
         self.bn_sa3 = make_norm(128)
-        self.o3_conv4 = Conv1x1(128, 1)
+        self.o3_conv4 = Conv1x1(128, 5)
         self.trans_conv3 = nn.ConvTranspose2d(128, 128, kernel_size=2, stride=2)
 
         self.ca4 = ChannelAttention(in_ch=384)
@@ -86,7 +86,7 @@ class DSIFN(nn.Module):
         self.o4_conv2 = conv2d_bn(128, 64, use_dropout)
         self.o4_conv3 = conv2d_bn(64, 64, use_dropout)
         self.bn_sa4 = make_norm(64)
-        self.o4_conv4 = Conv1x1(64, 1)
+        self.o4_conv4 = Conv1x1(64, 5)
         self.trans_conv4 = nn.ConvTranspose2d(64, 64, kernel_size=2, stride=2)
 
         self.ca5 = ChannelAttention(in_ch=192)
@@ -94,7 +94,7 @@ class DSIFN(nn.Module):
         self.o5_conv2 = conv2d_bn(64, 32, use_dropout)
         self.o5_conv3 = conv2d_bn(32, 16, use_dropout)
         self.bn_sa5 = make_norm(16)
-        self.o5_conv4 = Conv1x1(16, 1)
+        self.o5_conv4 = Conv1x1(16, 5) # 关键在这个1上面，应该改一下
 
     def forward(self, t1, t2):
         # Extract bi-temporal features

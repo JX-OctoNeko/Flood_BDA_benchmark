@@ -56,4 +56,8 @@ def to_pseudo_color(gray, color_map=cv2.COLORMAP_JET):
 def quantize_8bit(x):
     # [0.0,1.0] float => [0,255] uint8
     # or [0,1] int => [0,255] uint8
-    return (x*255).astype('uint8')
+
+    # 1.14 课上修改
+    # if np.any(x==3):
+    #     print("图片中有3")
+    return (x*50).astype('uint8') # *50

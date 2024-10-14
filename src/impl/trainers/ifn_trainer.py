@@ -8,7 +8,8 @@ from utils.losses import MixedLoss, CombinedLoss
 class IFNTrainer(CDTrainer_BCE):
     def _init_trainer(self):
         if self.ctx.get('mix_coeffs') is not None:
-            self.criterion = MixedLoss(self.criterion, self.ctx['mix_coeffs'])
+            self.criterion = self.criterion
+            #self.criterion = MixedLoss(self.criterion, self.ctx['mix_coeffs'])
         if self.ctx.get('cmb_coeffs') is not None:
             self.criterion = CombinedLoss(self.criterion, self.ctx['cmb_coeffs'])
 
@@ -17,4 +18,5 @@ class IFNTrainer(CDTrainer_BCE):
         return [F.interpolate(o, size=size).squeeze(1) for o in out]
 
     def _pred_to_prob(self, pred):
-        return F.sigmoid(pred[0])
+        # return F.softmax(pred[0], dim=1)
+        return [torch.nn.functional.softmax(o, dim=1).squeeze(1) for o in pred]

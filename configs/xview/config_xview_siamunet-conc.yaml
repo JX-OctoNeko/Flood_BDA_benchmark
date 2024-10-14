@@ -1,0 +1,4 @@
+# XVIEW-CD+SiamUNet-conc
+
+out_dir: siamunet-conc
+model: SiamUNet-conc

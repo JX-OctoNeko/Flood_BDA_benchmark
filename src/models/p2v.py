@@ -185,7 +185,7 @@ class SimpleDecoder(nn.Module):
             DecBlock(in_ch1, in_ch2, out_ch)
             for in_ch1, in_ch2, out_ch in zip(enc_chs, (itm_ch,)+dec_chs[:-1], dec_chs)
         ])
-        self.conv_out = Conv1x1(dec_chs[-1], 1)
+        self.conv_out = Conv1x1(dec_chs[-1], 5) # 这里要改outch 改成多少？改成5？
     
     def forward(self, x, feats):
         feats = feats[::-1]
@@ -209,7 +209,7 @@ class P2VNet(nn.Module):
         self.encoder_v = VideoEncoder(in_ch, enc_chs=enc_chs_v)
         enc_chs_v = tuple(ch*self.encoder_v.expansion for ch in enc_chs_v)
         self.encoder_p = PairEncoder(in_ch, enc_chs=enc_chs_p, add_chs=enc_chs_v)
-        self.conv_out_v = Conv1x1(enc_chs_v[-1], 1)
+        self.conv_out_v = Conv1x1(enc_chs_v[-1], 5) # 这里的1应该也要改成5
         self.convs_video = nn.ModuleList(
             [
                 Conv1x1(2*ch, ch, norm=True, act=True)
