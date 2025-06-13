@@ -27,7 +27,7 @@ class XVIEWDataset(CDDataset):
         return t1_list, t2_list, tar_list
 
     def fetch_target(self, target_path):
-        return (super().fetch_target(target_path)).astype(np.int) # np.int
+        return (super().fetch_target(target_path)).astype(np.int32) # np.int
 
     def preprocess(self, t1, t2, tar):
         if self.phase == 'train' and self.aug_train:

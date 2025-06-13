@@ -3,7 +3,7 @@
 
 # Data
 dataset: XVIEW
-num_workers: 2
+num_workers: 16
 repeats: 2
 subset: val
 crop_size: 256
@@ -59,3 +59,6 @@ weights:
 # Model
 model: 
 out_type: logits2
+
+# Semi-strategy
+semi_trategy: 'Strategy1'

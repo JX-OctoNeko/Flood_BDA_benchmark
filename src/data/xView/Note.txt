@@ -1,8 +1,0 @@
-~/CDLab/configs/xview
-
-~/CDLab/src/impl/builders.py
-~/CDLab/scripts/preprocess_xview2levir_cd.py
-~/CDLab/src/constants.py
-
-
-处理数据的时候需要注意 生成polygon这个文件是文件需要创建一个masks文件夹储存，然后再origin中把masks改名位targets就可以照旧操作了

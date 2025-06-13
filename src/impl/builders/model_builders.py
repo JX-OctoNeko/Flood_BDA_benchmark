@@ -27,27 +27,11 @@ def build_cdnet_model(C):
     return CDNet(6, 5)
 
 
-@MODELS.register_func('IFN_model')
-def build_ifn_model(C):
-    from models.ifn import DSIFN
-    model = DSIFN()
-    for p in model.encoder1.parameters():
-        p.requires_grad = False
-    for p in model.encoder2.parameters():
-        p.requires_grad = False
-    return model
-
-
 @MODELS.register_func('SNUNet_model')
 def build_snunet_model(C):
     from models.snunet import SNUNet
     return SNUNet(3, 5, 32)
 
-
-@MODELS.register_func('STANet_model')
-def build_stanet_model(C):
-    from models.stanet import STANet
-    return STANet(**C['stanet_model'])
 
 
 @MODELS.register_func('LUNet_model')
@@ -62,11 +46,6 @@ def build_p2v_model(C):
     return P2VNet(**C['p2v_model'])
 
 
-@MODELS.register_func('DSAMNet_model')
-def build_dsamnet_model(C):
-    from models.dsamnet import DSAMNet
-    return DSAMNet(**C['dsamnet_model'])
-
 
 @MODELS.register_func('BIT_model')
 def build_bit_model(C):
@@ -74,26 +53,7 @@ def build_bit_model(C):
     return BIT(**C['bit_model'])
 
 
-@MODELS.register_func('CDP_model')
-def build_cdp_model(C):
-    try:
-        import change_detection_pytorch as cdp
-    except ModuleNotFoundError:
-        raise ModuleNotFoundError("The change_detection.pytorch library is not available!")
-
-    cdp_model_cfg = C['cdp_model'].copy()
-    arch = cdp_model_cfg.pop('arch')
-    encoder_name = cdp_model_cfg.pop('encoder_name')
-    encoder_weights = cdp_model_cfg.pop('encoder_weights')
-    in_channels = cdp_model_cfg.pop('in_channels')
-    classes = cdp_model_cfg.pop('classes')
-    
-    model = cdp.create_model(
-        arch=arch,
-        encoder_name=encoder_name,
-        encoder_weights=encoder_weights,
-        in_channels=in_channels,
-        classes=classes,
-        **cdp_model_cfg
-    )
-    return model
+@MODELS.register_func(key="SPADANet_model")
+def build_spadanet_model(C):
+    from models.spadanet import SPADANet
+    return SPADANet(6, 5)

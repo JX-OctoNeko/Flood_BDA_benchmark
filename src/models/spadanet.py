@@ -17,8 +17,19 @@ import torch.nn.functional as F
 from ._blocks import Conv3x3, MaxPool2x2, ConvTransposed3x3
 from ._utils import Identity
 
+def simple_prior_attention(input_tensor):
+        b, c, h, w = input_tensor.size()
+        n = w * h - 1
+        x_minus_mu_square = (input_tensor - input_tensor.mean(dim=[2, 3], keepdim=True)).pow(2)
+        y = x_minus_mu_square / (4 * (x_minus_mu_square.sum(dim=[2, 3], keepdim=True) / n + 1e-4)) + 0.5
+        # attention maps
+        input_tensor_am = nn.Sigmoid()(y)
+        input_tensor_attention = input_tensor * input_tensor_am
 
-class UNet(nn.Module):
+        return input_tensor_attention
+
+
+class SPADANet(nn.Module):
     def __init__(self, in_ch, out_ch, use_dropout=False):
         super().__init__()
 
@@ -108,33 +119,45 @@ class UNet(nn.Module):
         x43 = self.do43(self.conv43(x42))
         x4p = self.pool4(x43)
 
+        # simam place0
+        x43_attention = simple_prior_attention(x43)
+
         # Stage 4d
         x4d = self.upconv4(x4p)
         pad4 = (0, x43.shape[3] - x4d.shape[3], 0, x43.shape[2] - x4d.shape[2])
-        x4d = torch.cat([F.pad(x4d, pad=pad4, mode='replicate'), x43], 1)
+        x4d = torch.cat([F.pad(x4d, pad=pad4, mode='replicate'), x43_attention], 1)
         x43d = self.do43d(self.conv43d(x4d))
         x42d = self.do42d(self.conv42d(x43d))
         x41d = self.do41d(self.conv41d(x42d))
 
+        # simam
+        x33_attention = simple_prior_attention(x33)
+
         # Stage 3d
         x3d = self.upconv3(x41d)
         pad3 = (0, x33.shape[3] - x3d.shape[3], 0, x33.shape[2] - x3d.shape[2])
-        x3d = torch.cat([F.pad(x3d, pad=pad3, mode='replicate'), x33], 1)
+        x3d = torch.cat([F.pad(x3d, pad=pad3, mode='replicate'), x33_attention], 1)
         x33d = self.do33d(self.conv33d(x3d))
         x32d = self.do32d(self.conv32d(x33d))
         x31d = self.do31d(self.conv31d(x32d))
 
+        # simam
+        x22_attention = simple_prior_attention(x22)
+
         # Stage 2d
         x2d = self.upconv2(x31d)
         pad2 = (0, x22.shape[3] - x2d.shape[3], 0, x22.shape[2] - x2d.shape[2])
-        x2d = torch.cat([F.pad(x2d, pad=pad2, mode='replicate'), x22], 1)
+        x2d = torch.cat([F.pad(x2d, pad=pad2, mode='replicate'), x22_attention], 1)
         x22d = self.do22d(self.conv22d(x2d))
         x21d = self.do21d(self.conv21d(x22d))
+
+        # simam
+        x12_attention = simple_prior_attention(x12)
 
         # Stage 1d
         x1d = self.upconv1(x21d)
         pad1 = (0, x12.shape[3] - x1d.shape[3], 0, x12.shape[2] - x1d.shape[2])
-        x1d = torch.cat([F.pad(x1d, pad=pad1, mode='replicate'), x12], 1)
+        x1d = torch.cat([F.pad(x1d, pad=pad1, mode='replicate'), x12_attention], 1)
         x12d = self.do12d(self.conv12d(x1d))
         x11d = self.conv11d(x12d)
 

@@ -72,32 +72,6 @@ class Metric(Meter):
         if pred.ndim == 4:
             pred = np.sum(pred, axis=1)
 
-        # p_has_zero = torch.any(torch.tensor(pred == 0))
-        # p_has_one = torch.any(torch.tensor(pred == 1))
-        # p_has_two = torch.any(torch.tensor(pred == 2))
-        # p_has_three = torch.any(torch.tensor(pred == 3))
-        # p_has_four = torch.any(torch.tensor(pred == 4))
-        #
-        # # 打印结果
-        # print("pred含有灰度值 0 的像素：", p_has_zero)
-        # print("pred含有灰度值 1 的像素：", p_has_one)
-        # print("pred含有灰度值 2 的像素：", p_has_two)
-        # print("pred含有灰度值 3 的像素：", p_has_three)
-        # print("pred含有灰度值 4 的像素：", p_has_four)
-
-        # has_zero = torch.any(torch.tensor(true == 0))
-        # has_one = torch.any(torch.tensor(true == 1))
-        # has_two = torch.any(torch.tensor(true == 2))
-        # has_three = torch.any(torch.tensor(true == 3))
-        # has_four = torch.any(torch.tensor(true == 4))
-        #
-        # # 打印结果
-        # print("true含有灰度值 0 的像素：", has_zero)
-        # print("true含有灰度值 1 的像素：", has_one)
-        # print("true含有灰度值 2 的像素：", has_two)
-        # print("true含有灰度值 3 的像素：", has_three)
-        # print("true含有灰度值 4 的像素：", has_four)
-
         true = true.ravel()
         pred = pred.ravel()
         # print(true[true!=0])
@@ -159,51 +133,6 @@ class Accuracy(Metric):
     def _calculate_metric(self, cm):
         return np.nan_to_num(np.diag(cm).sum()/cm.sum())
 
-    # def _calculate_metric(self, confusion_matrix):
-    #     num_classes = len(confusion_matrix)
-    #     accuracies = []
-    #
-    #     for i in range(num_classes):
-    #         tp = confusion_matrix[i][i]  # True positive
-    #         fp = np.sum(confusion_matrix[:, i]) - tp  # False positive
-    #         fn = np.sum(confusion_matrix[i, :]) - tp  # False negative
-    #         tn = np.sum(confusion_matrix) - tp - fp - fn  # True negative
-    #
-    #         if (tp + fp + fn + tn) == 0:
-    #             accuracy = 0
-    #         else:
-    #             accuracy = tp / (tp + fp)
-    #
-    #         accuracies.append(accuracy)
-    #
-    #     macro_accuracy = np.mean(accuracies)
-    #     return macro_accuracy # 计算总体macro_accuracy
-
-    # def _calculate_metric(self, confusion_matrix):
-    #     num_classes = len(confusion_matrix)
-    #     accuracies = []
-    #
-    #     for i in range(num_classes):
-    #         tp = confusion_matrix[i][i]  # True positive
-    #         fp = np.sum(confusion_matrix[:, i]) - tp  # False positive
-    #         fn = np.sum(confusion_matrix[i, :]) - tp  # False negative
-    #         tn = np.sum(confusion_matrix) - tp - fp - fn  # True negative
-    #
-    #         sample_count = np.sum(confusion_matrix)
-    #         print(sample_count)
-    #
-    #         if (tp + fp + fn + tn) == 0:
-    #             accuracy = 0
-    #         else:
-    #             accuracy_1 = (tp + tn) / (tp + tn + fn + fp)
-    #             accuracy = ((tp + fn) / sample_count) * accuracy_1
-    #
-    #         accuracies.append(accuracy)
-    #
-    #     return np.sum(accuracies) # 计算分别的acc
-
-
-
 
 class F1Score(Metric):
     __name__ = 'F1'
@@ -212,24 +141,11 @@ class F1Score(Metric):
         recall = np.nan_to_num(np.diag(cm)/cm.sum(axis=1))
         return np.nan_to_num(2*(prec*recall) / (prec+recall))
 
-class kappa(Metric):
+class Kappa(Metric):
     __name__ = "Kappa"
 
     def __init__(self, n_classes=4, mode='separ'):
         super().__init__(n_classes=n_classes, mode=mode, reduction='none')
-
-    # def plt_metric(self, cm):
-    #
-    #     import seaborn as sns
-    #     import matplotlib.pyplot as plt
-    #     labels = ["No damage", "Minor damage", "Major damage", "Destroyed"]
-    #     fig, ax = plt.subplot()
-    #     sns.heatmap(cm, annot=True, cmap="Blue", fmt='d', xticklabels=labels, yticklabels=labels)
-    #     ax.set_title("Confusion Matrix")
-    #     ax.set_xlabel("Predicted Labels")
-    #     ax.set_ylabel("True Labels")
-    #
-    #     plt.show()
 
     def _calculate_metric(self, cm):
         p_o = np.nan_to_num(np.diag(cm).sum() / cm.sum())

@@ -43,6 +43,7 @@ def main():
         parser.add_argument('--out_dir', default='')
         parser.add_argument('--weights', type=float, nargs='+', default=None)
         parser.add_argument('--out_type', type=str, choices=['logits', 'logits2', 'dist'], default='logits')
+        parser.add_argument('--semi_strategy', type=str, choices=['strategy1', 'strategy2', 'strategy3', 'strategy4'], default='strategy4')
 
         return parser
         

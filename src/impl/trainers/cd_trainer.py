@@ -19,7 +19,7 @@ from utils.data_utils.misc import (
     quantize_8bit as quantize,
 )
 from utils.utils import build_schedulers, HookHelper, FeatureContainer
-from utils.metrics import (Meter, Precision, Recall, Accuracy, F1Score, kappa)
+from utils.metrics import (Meter, Precision, Recall, Accuracy, F1Score, Kappa)
 
 
 class CDTrainer(Trainer):
@@ -57,6 +57,7 @@ class CDTrainer(Trainer):
             # Global steps
             self.train_step = 0
             self.eval_step = 0
+            self.strategy = settings['semi_trategy']
 
         # Whether to save network output
         self.save = self.ctx['save_on'] and not self.debug
@@ -102,9 +103,106 @@ class CDTrainer(Trainer):
             self.lr = self.optimizer.param_groups[0]['lr']
         return self.lr
 
+    # kl_divergence
     def compute_kl_divergence(self, p, q):
         kl = torch.sum(p * (torch.log(p + 1e-8) - torch.log(q + 1e-8)), dim=1)
         return torch.mean(kl)
+    
+    # Entropy minimization loss 
+    def compute_entropy_loss(self, probs_unlabeled):
+        # unsupervised entropy loss weight
+        unsupervised_weight_entropy = 0.001
+
+        # Entropy minimization
+        entropy_loss = -torch.mean(torch.sum(probs_unlabeled * torch.log(probs_unlabeled + 1e-8), dim=(1,)))
+
+        entropy_loss = unsupervised_weight_entropy * entropy_loss
+
+        return entropy_loss
+
+
+    def compute_kl_loss_strategy_1(self, probs_unlabeled, adaptive_dist):
+        """
+        Strategy1: Calculate the unsupervised loss using pseudo-labeled predictions as consistency regularization
+        Calculate KL divergence
+        """
+        
+        with torch.no_grad():
+            adaptive_dist.update(probs_unlabeled.mean(dim=(2, 3)))  # Take the average probability and update the adaptive distribution
+        adaptive_reference_distribution = adaptive_dist.get_adaptive_distribution()
+        adaptive_reference_distribution = adaptive_reference_distribution.to(self.device)
+        
+        # Calculating KL loss
+        kl_divergence_loss = self.compute_kl_divergence(probs_unlabeled.reshape(-1, 5),
+                                                    adaptive_reference_distribution.unsqueeze(0).repeat(
+                                                        probs_unlabeled.reshape(-1, 5).shape[0], 1))
+
+        # Defining total unsupervised loss and add weight
+        unsupervised_weight_kl = 0.001 # Setting weight based on lr, 1/10 of supervised loss
+        kl_divergence_loss = unsupervised_weight_kl * kl_divergence_loss
+        
+        return kl_divergence_loss
+    
+
+    def compute_kl_loss_strategy_2(self, probs_labeled, probs_unlabeled, adaptive_dist):
+        """
+        Strategy2: Calculate the unsupervised loss using gournd-truth label predictions as consistency regularization
+        Calculate KL divergence
+        The difference from 1 is that the gournd-truth label predictions are used in the calculation using adaptive dist
+        """
+        
+        # Updating adaptive distribution and get reference distribution
+        with torch.no_grad():
+            adaptive_dist.update(probs_labeled.mean(dim=(2, 3)))  # Getting mean probs and update adaptive distribution
+        adaptive_reference_distribution = adaptive_dist.get_adaptive_distribution()
+        adaptive_reference_distribution = adaptive_reference_distribution.to(self.device)
+        
+        # Calculating KL loss
+        kl_divergence_loss = self.compute_kl_divergence(probs_unlabeled.reshape(-1, 5),
+                                                        adaptive_reference_distribution.unsqueeze(0).repeat(
+                                                            probs_unlabeled.reshape(-1, 5).shape[0], 1))
+        
+        # Defining total unsupervised loss and add weight
+        unsupervised_weight_kl = 0.001  # Setting weight based on lr, 1/10 of supervised loss
+        kl_divergence_loss = unsupervised_weight_kl * kl_divergence_loss
+
+        return kl_divergence_loss
+    
+
+    def compute_kl_loss_strategy_3(self, tar, w_l, probs_unlabeled):
+        """
+        Strategy3: Calculate the unsupervised loss using gournd-truth label as consistency regularization
+        Calculate KL divergence
+        Instead of applying to the get_adaptive_distribution() class to obtain the reference distribution, the manually calculated
+        """
+
+        # Updating adaptive distribution and get reference distribution
+        true_labeled_group = tar[w_l, ...]
+        
+        # First the tensor is flattened to a tensor of shape [x, 256*256]
+        flat_true_labeled_group = true_labeled_group.view(true_labeled_group.size(0), -1)
+        
+        # Count the number of pixels in all images for each category
+        class_counts = torch.zeros(5)  # Create an zero tensor of shape [5] for counting the number of pixels in each category
+        for i in range(5):
+            class_counts[i] = (flat_true_labeled_group == i).sum(dim=1).sum()  # Count the number of pixels in each category
+        
+        # Calculate the percentage of each category in all images
+        total_pixels = flat_true_labeled_group.size(1) * flat_true_labeled_group.size(0)  # Calculate the total number of pixels
+        adaptive_reference_distribution = class_counts / total_pixels  # Calculate the proportion of each category
+        
+        adaptive_reference_distribution = adaptive_reference_distribution.to(self.device)
+        
+        # Calculating KL loss
+        kl_divergence_loss = self.compute_kl_divergence(probs_unlabeled.reshape(-1, 5),
+                                                        adaptive_reference_distribution.unsqueeze(0).repeat(
+                                                            probs_unlabeled.reshape(-1, 5).shape[0], 1))
+
+        # Defining total unsupervised loss and add weight
+        unsupervised_weight_kl = 0.001  # Setting weight based on lr, 1/10 of supervised loss
+        kl_divergence_loss = unsupervised_weight_kl * kl_divergence_loss
+
+        return kl_divergence_loss
 
     def train_epoch(self, epoch):
         losses = Meter()
@@ -127,176 +225,36 @@ class CDTrainer(Trainer):
                 out = self.model(t1, t2)
 
             """
-            修改loss: 将伪标签判断
+            Include pseudo-labeling in calculations
             """
             w_l = []  # with label
             wo_l = []  # without label
             for p in range(tar.size(0)):
-                # 使用eq检查灰度值
+                # checking the gray value by eq
                 if torch.any(torch.eq(tar[p], 6)):
-                    # 如果像素值有6就添加索引到列表
+                    # if value=6 add to list
                     wo_l.append(p)
                 else:
                     w_l.append(p)
 
-            # print(f"无标签数据：{wo_l}")
-            # print(f"有标签数据：{w_l}")
-            # 初始化自适应分布缓冲区
-            buffer_size = 10  # 可以根据实际情况调整缓冲区大小
+            # Initialize the adaptive distribution buffer
+            buffer_size = 10  # Buffer size can be adjusted according to the actual situation
             adaptive_dist = AdaptiveDistribution(buffer_size)
 
-            # print(len(out), type(out))
-            # print(out.shape)
-            # print(out[0].shape)
-            # print(out[1].shape)
-
             pred = self._process_model_out(out)
-            # print(type(pred))
-            # print(len(pred))
-            # print(pred[0].shape)
-            # print(pred[1].shape)
-            # if isinstance(pred, list):
-            #     probs_pred = torch.zeros((8,5,256,256)).to(self.device)
-            #     for pred_item in pred:
-            #         print(pred_item.shape)
-            #         probs_pred += self._pred_to_prob(pred_item)
-            # else:
-            #     probs_pred = self._pred_to_prob(pred) # 8 5 256 256, 概率图
+
             probs_pred = self._pred_to_prob(pred)
-            # print(type(probs_pred))
-            if isinstance(probs_pred, list):
-                prob = []
-                for pp in probs_pred:
-                    _, prob_tmp = torch.max(pp, dim=1)  # 8 256 256 # 预测图
-                    prob.append(prob_tmp)
-            else:
-                _, prob = torch.max(probs_pred, dim=1)  # 8 256 256 # 预测图
+            
+            # Obtain a list of true and pseudo labels, in this experiment the pseudo labels are replaced by gray scale values 6
+            labeled_images = tar[w_l, :, :]  # Labeled samples
+            unlabeled_images = tar[wo_l, :, :]  # Unlabeled samples (this experiment set is 6)
 
-            # print(type(probs_pred))
-            # print(probs_pred.shape)
-            # print("out的shape是", out.shape)
-            # print("pred的shape是", pred.shape)
-            # print("probs_pred的shape是", probs_pred.shape)
-            # print("prob的shape是", prob.shape)
-
-            # print("out的tensor_0是", out[0][0])
-            # print("out的tensor_1是", out[0][1])
-            # print("out的tensor_2是", out[0][2])
-            # print("out的tensor_3是", out[0][3])
-            # print("out的tensor_4是", out[0][4])
-
-            # print("pred的tensor是", pred)
-            # print("probs_pred的tensor是", probs_pred)
-            # print("prob的tensor是", prob)
-            # print("out的tensor_1是", torch.any(torch.tensor(prob[0] == 1)))
-            # print("out的tensor_2是", torch.any(torch.tensor(prob[0] == 2)))
-            # print("out的tensor_3是", torch.any(torch.tensor(prob[0] == 3)))
-            # print("out的tensor_4是", torch.any(torch.tensor(prob[0] == 4)))
-
-            # print(len(pred))
-            # print(type(pred))
-            # print(pred[0].shape)
-            # print(pred[1].shape)
-            # print(len( probs_pred))
-            # print(type( probs_pred))
-            # print( probs_pred[0].shape)
-            # print( probs_pred[1].shape)
-            # print(pred.shape)
-            # print(prob.shape)
-            # print(probs_pred.shape)
-
-            """
-            判断without_label元组是否为空
-            """
-
+            # Determine if the without_label tuple is empty
+            # if no unlabeled image in this batch
             if len(wo_l) == 0:
-                # print("ok--1")
                 loss = self.criterion(probs_pred, tar)
+            # if no labeled image in this batch
             elif len(w_l) == 0:
-                # print("ok--2")
-                # 获取有标签和无标签数据
-                # labeled_images = tar[torch.tensor(w_l), :, :]  # 取出已知标签的样本
-                # unlabeled_images = tar[torch.tensor(wo_l), :, :]  # 取出未知标签（标签为6）的样本
-
-                labeled_images = tar[w_l, :, :]  # 取出已知标签的样本
-                unlabeled_images = tar[wo_l, :, :]  # 取出未知标签（标签为6）的样本
-
-                # supervised_loss = self.criterion(pred[torch.tensor(w_l), :, :], labeled_images)
-
-                # supervised_loss = self.criterion(probs_pred[w_l, :, :], labeled_images)
-
-                # 对于无标签数据，模型预测概率分布并计算熵最小化和KL散度损失
-                # probs_unlabeled = probs_pred[torch.tensor(wo_l), :, :, :]
-
-                """
-                1.将fake label预测出来的prediction作为一致性正则化的干扰，计算kl loss
-                """
-                # if isinstance(probs_pred, list):
-                #     # print(probs_pred[1].shape)
-                #     probs_unlabeled = torch.zeros_like(probs_pred[0][wo_l, ...])
-                #     # print(probs_unlabeled.shape)
-                #     # print("ok")
-                #     for l in probs_pred:
-                #         # print(probs_unlabeled.shape)
-                #         # print(l[wo_l, ...].shape)
-                #         probs_unlabeled += l[wo_l, ...]
-                # else:
-                #     probs_unlabeled = probs_pred[wo_l, ...]
-                #
-                # entropy_loss = -torch.mean(torch.sum(probs_unlabeled * torch.log(probs_unlabeled + 1e-8), dim=(1,)))
-                #
-                # with torch.no_grad():
-                #     adaptive_dist.update(probs_unlabeled.mean(dim=(2, 3)))  # 取平均概率并更新自适应分布
-                # adaptive_reference_distribution = adaptive_dist.get_adaptive_distribution()
-                # adaptive_reference_distribution = adaptive_reference_distribution.to(self.device)
-                #
-                # # print(probs_unlabeled.reshape(-1,5).shape)
-                # # print(probs_unlabeled.reshape(-1,5).shape[0])
-                # # print(adaptive_reference_distribution.shape)
-                # # print(adaptive_reference_distribution.unsqueeze(0).shape)
-                #
-                # # 计算KL散度损失
-                # kl_divergence_loss = self.compute_kl_divergence(probs_unlabeled.reshape(-1, 5),
-                #                                            adaptive_reference_distribution.unsqueeze(0).repeat(
-                #                                                probs_unlabeled.reshape(-1, 5).shape[0], 1))
-                #
-                # # 定义总无监督损失，并添加权重
-                # # print(entropy_loss)
-                # # print(kl_divergence_loss)
-                # unsupervised_weight_entropy = 0.001
-                # unsupervised_weight_kl = 0.001 # 根据lr设定权重，全监督loss的1/10
-                # total_unsupervised_loss = unsupervised_weight_entropy * entropy_loss + \
-                #                           unsupervised_weight_kl * kl_divergence_loss
-
-                """
-                *2.将true label预测出来的prediction作为一致性正则化的干扰，计算kl loss 这个在这里是不成立的，因为本来就没有标签，所以就没有分布
-                """
-                # if isinstance(probs_pred, list):
-                #     probs_unlabeled = torch.zeros_like(probs_pred[0][wo_l, ...])
-                #     for l in probs_pred:
-                #         probs_unlabeled += l[wo_l, ...]
-                # else:
-                #     probs_unlabeled = probs_pred[wo_l, ...]
-                #
-                # entropy_loss = -torch.mean(torch.sum(probs_unlabeled * torch.log(probs_unlabeled + 1e-8), dim=(1,)))
-                # total_unsupervised_loss = entropy_loss
-
-                """
-                3.将true label作为一致性正则化的干扰，计算kl loss
-                """
-                # if isinstance(probs_pred, list):
-                #     probs_unlabeled = torch.zeros_like(probs_pred[0][wo_l, ...])
-                #     for l in probs_pred:
-                #         probs_unlabeled += l[wo_l, ...]
-                # else:
-                #     probs_unlabeled = probs_pred[wo_l, ...]
-                #
-                # entropy_loss = -torch.mean(torch.sum(probs_unlabeled * torch.log(probs_unlabeled + 1e-8), dim=(1,)))
-                # total_unsupervised_loss = entropy_loss
-
-                """
-                4.将综合策略做组
-                """
                 if isinstance(probs_pred, list):
                     probs_unlabeled = torch.zeros_like(probs_pred[0][wo_l, ...])
                     for l in probs_pred:
@@ -304,177 +262,61 @@ class CDTrainer(Trainer):
                 else:
                     probs_unlabeled = probs_pred[wo_l, ...]
 
-                entropy_loss = -torch.mean(torch.sum(probs_unlabeled * torch.log(probs_unlabeled + 1e-8), dim=(1,)))
-
-                with torch.no_grad():
-                    adaptive_dist.update(probs_unlabeled.mean(dim=(2, 3)))  # 取平均概率并更新自适应分布
-                adaptive_reference_distribution = adaptive_dist.get_adaptive_distribution()
-                adaptive_reference_distribution = adaptive_reference_distribution.to(self.device)
-
-                # 计算KL散度损失
-                kl_divergence_loss = self.compute_kl_divergence(probs_unlabeled.reshape(-1, 5),
-                                                                adaptive_reference_distribution.unsqueeze(0).repeat(
-                                                                    probs_unlabeled.reshape(-1, 5).shape[0], 1))
-
-                # 定义总无监督损失，并添加权重
-                unsupervised_weight_entropy = 0.001
-                unsupervised_weight_kl = 0.001  # 根据lr设定权重，全监督loss的1/10
-                total_unsupervised_loss = unsupervised_weight_entropy * entropy_loss + \
-                                          unsupervised_weight_kl * kl_divergence_loss
-
                 """
-                前面其实如果没有真实标签就采用熵最小化的方法优化，有真实标签才会使用到kl loss采用一致性归一化
+                When using strategies 1, 4, calculate the sum of kl loss and entropy minimization loss 
+                When using strategies 2, 3, because the true label is 0, no reference distribution is formed and no kl loss has to be calculated 
+                Whereas all four methods use an entropy minimization loss, a kl loss is added at 1, 4, and at wl = 0 is the same
                 """
-                # 计算总的损失并优化
-                loss = total_unsupervised_loss
-                # loss = 0 * entropy_loss # 计算benchmark使用的，为了是把loss变为0
 
+                if self.strategy == "Strategy1":
+
+                    """
+                    1. The prediction predicted by the pseudo label is used as the consistency regularization to compute the kl loss
+                    """
+                    kl_divergence_loss = self.compute_kl_loss_strategy_1(probs_unlabeled, adaptive_dist)
+                    entropy_loss = self.compute_entropy_loss(probs_unlabeled)
+                    total_unsupervised_loss = kl_divergence_loss + entropy_loss
+
+                elif self.strategy == "Strategy2":
+                    """
+                    2. Compute the kl loss by using the prediction from the true label as a consistency regularized disturbance 
+                    This does not hold here because there is no label in the first place, so there is no distribution
+                    """
+                    entropy_loss = self.compute_entropy_loss(probs_unlabeled)
+                    total_unsupervised_loss = entropy_loss
+
+                elif self.strategy == "Strategy3":
+                    """
+                    3. The true label is used as a disturbance for consistency regularization to compute the kl loss
+                    No kl loss for the same reason as in 2
+                    """
+                    entropy_loss = self.compute_entropy_loss(probs_unlabeled)
+                    total_unsupervised_loss = entropy_loss
+                elif self.strategy == "Strategy4":
+                    """
+                    4. Comprehensive strategy
+                    """
+                    kl_divergence_loss = self.compute_kl_loss_strategy_1(probs_unlabeled, adaptive_dist)
+                    entropy_loss = self.compute_entropy_loss(probs_unlabeled)
+                    total_unsupervised_loss = kl_divergence_loss + entropy_loss
+                elif self.strategy == "None":
+                    """
+                    5. No image-level consistency regularization
+                    """
+                    total_unsupervised_loss = 0
+
+            # mixed batch with labeled and unlabeled data
             else:
-                # print("ok--3")
-                # 获取有标签和无标签数据
-                # labeled_images = tar[torch.tensor(w_l), :, :]  # 取出已知标签的样本
-                # unlabeled_images = tar[torch.tensor(wo_l), :, :]  # 取出未知标签（标签为6）的样本
-
-                labeled_images = tar[w_l, :, :]  # 取出已知标签的样本
-                unlabeled_images = tar[wo_l, :, :]  # 取出未知标签（标签为6）的样本
-
-                # supervised_loss = self.criterion(pred[torch.tensor(w_l), :, :], labeled_images)
-
+                # supervised loss
                 if isinstance(probs_pred, list):
-                    # supervised_loss = torch.tensor(0).to(self.device)
                     pp = []
                     for l in probs_pred:
-                        # supervised_loss += self.criterion(l[w_l, :, :], labeled_images)
                         pp.append(l[w_l, ...])
                     supervised_loss = self.criterion(pp, labeled_images)
                 else:
                     supervised_loss = self.criterion(probs_pred[w_l, :, :], labeled_images)
 
-                # supervised_loss = self.criterion(probs_pred[w_l, :, :], labeled_images)
-
-                """
-                1.将fake label预测出来的prediction作为一致性正则化的干扰，计算kl loss
-                """
-                # # 对于无标签数据，模型预测概率分布并计算熵最小化和KL散度损失
-                # # probs_unlabeled = probs_pred[torch.tensor(wo_l), :, :, :]
-                #
-                # if isinstance(probs_pred, list):
-                #     # print(probs_pred[1].shape)
-                #     probs_unlabeled = torch.zeros_like(probs_pred[0][wo_l, ...])
-                #     # print(probs_unlabeled.shape)
-                #     # print("ok")
-                #     for l in probs_pred:
-                #         # print(probs_unlabeled.shape)
-                #         # print(l[wo_l, ...].shape)
-                #         probs_unlabeled += l[wo_l, ...]
-                # else:
-                #     probs_unlabeled = probs_pred[wo_l, ...]
-                #
-                #
-                # entropy_loss = -torch.mean(torch.sum(probs_unlabeled * torch.log(probs_unlabeled + 1e-8), dim=(1,)))
-                #
-                # # 更新自适应分布并获取参考分布
-                #
-                # with torch.no_grad():
-                #     adaptive_dist.update(probs_unlabeled.mean(dim=(2, 3)))  # 取平均概率并更新自适应分布
-                # adaptive_reference_distribution = adaptive_dist.get_adaptive_distribution()
-                # adaptive_reference_distribution = adaptive_reference_distribution.to(self.device)
-                #
-                # # print(probs_unlabeled.reshape(-1,5).shape)
-                # # print(probs_unlabeled.reshape(-1,5).shape[0])
-                # # print(adaptive_reference_distribution.shape)
-                # # print(adaptive_reference_distribution.unsqueeze(0).shape)
-                #
-                # # 计算KL散度损失
-                # kl_divergence_loss = self.compute_kl_divergence(probs_unlabeled.reshape(-1, 5),
-                #                                            adaptive_reference_distribution.unsqueeze(0).repeat(
-                #                                                probs_unlabeled.reshape(-1, 5).shape[0], 1))
-                #
-                # # 定义总无监督损失，并添加权重
-                # unsupervised_weight_entropy = 0.001
-                # unsupervised_weight_kl = 0.001 # 根据lr设定权重，全监督loss的1/10
-                # total_unsupervised_loss = unsupervised_weight_entropy * entropy_loss + \
-                #                           unsupervised_weight_kl * kl_divergence_loss
-
-                """
-                2.将true label预测出来的prediction作为一致性正则化的干扰，计算kl loss
-                """
-                # # 对于无标签数据，模型预测概率分布并计算熵最小化和KL散度损失
-                # if isinstance(probs_pred, list):
-                #     probs_labeled = torch.zeros_like(probs_pred[0][w_l, ...])
-                #     probs_unlabeled = torch.zeros_like(probs_pred[0][w_l, ...])
-                #     for l in probs_pred:
-                #         probs_labeled += l[w_l, ...]
-                #         probs_unlabeled += l[wo_l, ...]
-                # else:
-                #     probs_labeled = probs_pred[w_l, ...]
-                #     probs_unlabeled = probs_pred[wo_l, ...]
-                #
-                # entropy_loss = -torch.mean(torch.sum(probs_unlabeled * torch.log(probs_unlabeled + 1e-8), dim=(1,)))
-                #
-                # # 更新自适应分布并获取参考分布
-                #
-                # with torch.no_grad():
-                #     adaptive_dist.update(probs_labeled.mean(dim=(2, 3)))  # 取平均概率并更新自适应分布
-                # adaptive_reference_distribution = adaptive_dist.get_adaptive_distribution()
-                # adaptive_reference_distribution = adaptive_reference_distribution.to(self.device)
-                #
-                # # 计算KL散度损失
-                # kl_divergence_loss = self.compute_kl_divergence(probs_unlabeled.reshape(-1, 5),
-                #                                                 adaptive_reference_distribution.unsqueeze(0).repeat(
-                #                                                     probs_unlabeled.reshape(-1, 5).shape[0], 1))
-                #
-                # # 定义总无监督损失，并添加权重
-                # unsupervised_weight_entropy = 0.001
-                # unsupervised_weight_kl = 0.001  # 根据lr设定权重，全监督loss的1/10
-                # total_unsupervised_loss = unsupervised_weight_entropy * entropy_loss + \
-                #                           unsupervised_weight_kl * kl_divergence_loss
-
-                """
-                3.将true label作为一致性正则化的干扰，计算kl loss
-                """
-                # # 对于无标签数据，模型预测概率分布并计算熵最小化和KL散度损失
-                # if isinstance(probs_pred, list):
-                #     probs_unlabeled = torch.zeros_like(probs_pred[0][w_l, ...])
-                #     for l in probs_pred:
-                #         probs_unlabeled += l[wo_l, ...]
-                # else:
-                #     probs_unlabeled = probs_pred[wo_l, ...]
-                #
-                # entropy_loss = -torch.mean(torch.sum(probs_unlabeled * torch.log(probs_unlabeled + 1e-8), dim=(1,)))
-                #
-                # # 更新自适应分布并获取参考分布
-                # true_labeled_group = tar[w_l, ...]
-                #
-                # # 首先将张量展平为形状为[x, 256*256]的张量
-                # flat_true_labeled_group = true_labeled_group.view(true_labeled_group.size(0), -1)
-                #
-                # # 统计每个类别在所有图片中的像素数量
-                # class_counts = torch.zeros(5)  # 创建一个形状为[5]的全零张量，用于统计每个类别的像素数量
-                # for i in range(5):
-                #     class_counts[i] = (flat_true_labeled_group == i).sum(dim=1).sum()  # 统计每个类别的像素数量
-                #
-                # # 计算每个类别在所有图片中的比例
-                # total_pixels = flat_true_labeled_group.size(1) * flat_true_labeled_group.size(0)  # 计算总像素数量
-                # adaptive_reference_distribution = class_counts / total_pixels  # 计算每个类别的比例
-                #
-                # adaptive_reference_distribution = adaptive_reference_distribution.to(self.device)
-                #
-                # # 计算KL散度损失
-                # kl_divergence_loss = self.compute_kl_divergence(probs_unlabeled.reshape(-1, 5),
-                #                                                 adaptive_reference_distribution.unsqueeze(0).repeat(
-                #                                                     probs_unlabeled.reshape(-1, 5).shape[0], 1))
-                #
-                # # 定义总无监督损失，并添加权重
-                # unsupervised_weight_entropy = 0.001
-                # unsupervised_weight_kl = 0.001  # 根据lr设定权重，全监督loss的1/10
-                # total_unsupervised_loss = unsupervised_weight_entropy * entropy_loss + \
-                #                           unsupervised_weight_kl * kl_divergence_loss
-
-                """
-                4.将3种合一作为一致性正则化的干扰，计算kl loss
-                """
-                # 对于无标签数据，模型预测概率分布并计算熵最小化和KL散度损失
+                # Obtain unlabeled and labeled predictions for subsequent use
                 if isinstance(probs_pred, list):
                     probs_labeled = torch.zeros_like(probs_pred[0][w_l, ...])
                     probs_unlabeled = torch.zeros_like(probs_pred[0][w_l, ...])
@@ -484,86 +326,61 @@ class CDTrainer(Trainer):
                 else:
                     probs_labeled = probs_pred[w_l, ...]
                     probs_unlabeled = probs_pred[wo_l, ...]
+                
+                if self.strategy == "Strategy1":
+                    """
+                    1. Use the prediction from the pseudo label as the consistency regularization, and compute the kl loss 
+                    This is the same as when wl is 0 
+                    because the true label is not used as the reference distribution here.
+                    """  
+                    kl_divergence_loss = self.compute_kl_loss_strategy_1(probs_unlabeled, adaptive_dist)
+                    entropy_loss = self.compute_entropy_loss(probs_unlabeled)
+                
+                elif self.strategy == "Strategy2":
+                    """
+                    2. Use the prediction from the ground truth label as the consistency regularization
+                    """
+                    entropy_loss = self.compute_entropy_loss(probs_unlabeled)
+                    kl_divergence_loss = self.compute_kl_loss_strategy_2(probs_labeled, probs_unlabeled, adaptive_dist)
+                    total_unsupervised_loss = kl_divergence_loss, entropy_loss
 
-                entropy_loss = -torch.mean(torch.sum(probs_unlabeled * torch.log(probs_unlabeled + 1e-8), dim=(1,)))
+                elif self.strategy == "Strategy3":
+                    """
+                    3. Use the ground truth label as the consistency regularization
+                    """
+                    entropy_loss = self.compute_entropy_loss(probs_unlabeled)
+                    kl_divergence_loss = self.compute_kl_loss_strategy_3(probs_labeled, probs_unlabeled, adaptive_dist)
+                    total_unsupervised_loss = kl_divergence_loss, entropy_loss
 
-                # 更新自适应分布并获取参考分布
-                """
-                第一种策略，使用伪标签预测值做组获得的kl loss
-                """
-                with torch.no_grad():
-                    adaptive_dist.update(probs_unlabeled.mean(dim=(2, 3)))  # 取平均概率并更新自适应分布
-                adaptive_reference_distribution_1 = adaptive_dist.get_adaptive_distribution()
-                adaptive_reference_distribution_1 = adaptive_reference_distribution_1.to(self.device)
+                elif self.strategy == "Strategy4":
+                    """
+                    4. Compute kl loss by using the 3 diff strategies
+                    """
+                    entropy_loss = self.compute_entropy_loss(probs_unlabeled)
 
-                # 计算KL散度损失
-                kl_divergence_loss_1 = self.compute_kl_divergence(probs_unlabeled.reshape(-1, 5),
-                                                                  adaptive_reference_distribution_1.unsqueeze(0).repeat(
-                                                                      probs_unlabeled.reshape(-1, 5).shape[0], 1))
-                """
-                第二种策略，使用真实标签预测值做组获得的kl loss
-                """
-                with torch.no_grad():
-                    adaptive_dist.update(probs_labeled.mean(dim=(2, 3)))  # 取平均概率并更新自适应分布
-                adaptive_reference_distribution_2 = adaptive_dist.get_adaptive_distribution()
-                adaptive_reference_distribution_2 = adaptive_reference_distribution_2.to(self.device)
+                    """
+                    strategy1
+                    """
+                    kl_divergence_loss_1 = self.compute_kl_loss_strategy_1(probs_unlabeled, adaptive_dist)
 
-                # 计算KL散度损失
-                kl_divergence_loss_2 = self.compute_kl_divergence(probs_unlabeled.reshape(-1, 5),
-                                                                  adaptive_reference_distribution_2.unsqueeze(0).repeat(
-                                                                      probs_unlabeled.reshape(-1, 5).shape[0], 1))
+                    """
+                    strategy2
+                    """
+                    kl_divergence_loss_2 = self.compute_kl_loss_strategy_2(probs_labeled, probs_unlabeled, adaptive_dist)
 
-                """
-                第三种策略，使用真实标签做组获得的kl loss
-                """
-                # 更新自适应分布并获取参考分布
-                true_labeled_group = tar[w_l, ...]
+                    """
+                    strategy3
+                    """
+                    kl_divergence_loss_3 = self.compute_kl_loss_strategy_3(tar, w_l, probs_unlabeled)
 
-                # 首先将张量展平为形状为[x, 256*256]的张量
-                flat_true_labeled_group = true_labeled_group.view(true_labeled_group.size(0), -1)
-
-                # 统计每个类别在所有图片中的像素数量
-                class_counts = torch.zeros(5)  # 创建一个形状为[5]的全零张量，用于统计每个类别的像素数量
-                for i in range(5):
-                    class_counts[i] = (flat_true_labeled_group == i).sum(dim=1).sum()  # 统计每个类别的像素数量
-
-                # 计算每个类别在所有图片中的比例
-                total_pixels = flat_true_labeled_group.size(1) * flat_true_labeled_group.size(0)  # 计算总像素数量
-                adaptive_reference_distribution_3 = class_counts / total_pixels  # 计算每个类别的比例
-
-                adaptive_reference_distribution_3 = adaptive_reference_distribution_3.to(self.device)
-
-                # 计算KL散度损失
-                kl_divergence_loss_3 = self.compute_kl_divergence(probs_unlabeled.reshape(-1, 5),
-                                                                  adaptive_reference_distribution_3.unsqueeze(0).repeat(
-                                                                      probs_unlabeled.reshape(-1, 5).shape[0], 1))
-
-                # 定义总无监督损失，并添加权重
-                unsupervised_weight_entropy = 0.001
-                unsupervised_weight_kl_1 = 0.001  # 根据lr设定权重，全监督loss的1/10
-                unsupervised_weight_kl_2 = 0.001  # 根据lr设定权重，全监督loss的1/10
-                unsupervised_weight_kl_3 = 0.001  # 根据lr设定权重，全监督loss的1/10
-                total_unsupervised_loss = unsupervised_weight_entropy * entropy_loss + \
-                                          unsupervised_weight_kl_1 * kl_divergence_loss_1 + \
-                                          unsupervised_weight_kl_2 * kl_divergence_loss_2 + \
-                                          unsupervised_weight_kl_3 * kl_divergence_loss_3
+                    total_unsupervised_loss = entropy_loss + kl_divergence_loss_1, kl_divergence_loss_2, kl_divergence_loss_3
 
                 """
-                前面的注释是3种策略产生的unsupervised loss
+                unsupervised loss based on three different batch composition
                 """
-                # 计算总的损失并优化
+                # Calculate total loss and optimize
                 loss = total_unsupervised_loss + supervised_loss
-                # loss = supervised_loss
-                # print(supervised_loss)
-                # print(total_unsupervised_loss)
 
-            # 1.14 课上修改
-            # loss = 0
-            # for p in pred:
-            #     loss += self.criterion(pred, tar)
-
-            # 原始代码
-            # loss = self.criterion(pred, tar)
             losses.update(loss.item(), n=tar.shape[0])
 
             self.optimizer.zero_grad()
@@ -607,14 +424,8 @@ class CDTrainer(Trainer):
 
         # Construct metrics
         metrics = (Precision(mode='accum'), Recall(mode='accum'), F1Score(mode='accum'), Accuracy(mode='accum'),
-                   kappa(mode="accum"))
-        # new_metrics = (Precision(mode='accum'), Recall(mode='accum'), F1Score(mode='accum'), Accuracy(mode='accum'))
-
+                   Kappa(mode="accum"))
         self.model.eval()
-        # num_classes = 5
-        # precision_per_class = np.zeros(num_classes)
-        # recall_per_class = np.zeros(num_classes)
-        # f1_per_class = np.zeros(num_classes)
 
         with torch.no_grad():
             total_cm = numpy.zeros((2, 2))  # 2x2 cm
@@ -643,7 +454,6 @@ class CDTrainer(Trainer):
 
                 pred = self._process_model_out(out)
                 probs_pred = self._pred_to_prob(pred)  # 8 5 256 256, 概率图
-                # print(type(probs_pred))
                 if isinstance(probs_pred, list):
                     prob = []
                     prob_top2 = []
@@ -658,26 +468,14 @@ class CDTrainer(Trainer):
                     _, prob_top2 = probs_pred.topk(k=2, dim=1)
                     prob_top2 = prob_top2[:, 1, :]
 
-                # _, prob = torch.max(probs_pred, dim=1)  # 8 256 256 # 预测图
-
-                # print(pred[w_l, ...].shape)
-                # print(pred[wo_l, ...].shape)
-                # print(pred.shape)
-                # print(tar.shape)
-
                 """
                 判断without_label元组是否为空
                 """
                 if len(w_l) == 0:
-                    # loss = torch.tensor(0)
                     losses.update(0, n=1)
                 else:
                     # 获取有标签和无标签数据
-                    # labeled_images = tar[torch.tensor(w_l), :, :]  # 取出已知标签的样本
                     labeled_images = tar[w_l, :, :]  # 取出已知标签的样本
-
-                    # loss = self.criterion(pred[torch.tensor(w_l), :, :], labeled_images)
-                    # loss = self.criterion(probs_pred[w_l, :, :], labeled_images)
 
                     if isinstance(probs_pred, list):
                         pp = []
@@ -691,10 +489,6 @@ class CDTrainer(Trainer):
 
                 labeled_images = labeled_images
 
-                # Convert to numpy arrays
-                # pred = pred[torch.tensor(w_l), :, :].cpu().numpy()
-
-                # prob = prob[w_l, :, :].cpu().numpy()
                 if isinstance(prob, list):
                     prob = prob[0][w_l, ...].cpu().numpy()
                     prob_top2 = prob_top2[0][w_l, ...].cpu().numpy()
@@ -702,34 +496,15 @@ class CDTrainer(Trainer):
                     prob = prob[w_l, :, :].cpu().numpy()
                     prob_top2 = prob_top2[w_l, ...].cpu().numpy()
 
-                # print(prob.shape)
-                # desired_value = 4 # 选择要检查的值
-                # contains_desired_value = np.any(prob == desired_value)
-                # 打印结果
-                # print(f"tensor中是否含有像素值{desired_value}:{contains_desired_value}")
-                # cm = (prob>0.5).astype('uint8')
 
                 cm = prob.astype('uint8')
 
-                # if (cm == 3).any():
-                #     print("有3像素")
-                # if (cm == 4).any():
-                #     print("有4像素")
-
                 cm_top2 = prob_top2.astype('uint8')
-                # print(cm.shape, cm_top2.shape)
                 mask = (cm == 0)
                 cm[mask] = cm_top2[mask]
-                # print(cm[0])
-                # print(tar[0])
-
-                # print(cm.shape)
-                # tar = tar[torch.tensor(w_l), :, :].cpu().numpy().astype('uint8')
                 tar = tar[w_l, :, :].cpu().numpy().astype('uint8')
                 mask = (tar == 0)
                 cm[mask] = tar[mask]
-                # print(cm[0])
-                # print(tar[0])
 
                 for m in metrics:
                     m.update(cm, tar, n=len(w_l))
@@ -743,13 +518,7 @@ class CDTrainer(Trainer):
                         new_n = len(w_l)
                         plt_cm += one_plt_cm * new_n
 
-                # if (cm == 3).any():
-                #     print("有3像素")
-                # if (cm == 4).any():
-                #     print("有4像素")
-                # 这里cm变量还有3，4值
-
-                # 在这里就是能计算2分类结果
+                # 将4分类转换为2分类的计算
                 new_cm = cm
                 new_mask = (new_cm > 1)
                 new_cm[new_mask] = 2
@@ -757,40 +526,9 @@ class CDTrainer(Trainer):
                 new_tar = tar
                 new_tar[new_tar_mask] = 2
 
-                # # 这之后就没有了3，4
-                # # if (cm == 3).any():
-                # #     print("有1像素")
-                # # if (cm == 4).any():
-                # #     print("有2像素")
-
                 batch_cm = confusion_matrix((new_tar[tar != 0] - 1).ravel(), (new_cm[tar != 0] - 1).ravel())
-                # # print(batch_cm)
                 if total_cm.shape == batch_cm.shape:
                     total_cm += batch_cm
-                    # print(total_cm.shape) # 2*2
-                #     # print("calculate + 1 !")
-                #     # print(total_cm.shape)
-                #     # print(total_cm)
-
-                #
-                # for new_m in new_metrics:
-                #
-                #     new_m.update(new_cm, new_tar, n=len(w_l))
-
-                # for j in range(num_classes):
-                #     tp = m._cm.val[j, j]
-                #     fp = np.sum(m._cm.val[:, j]) - tp
-                #     fn = np.sum(m._cm.val[j, :]) - tp
-                #
-                #     # Precision
-                #     precision_per_class[j] += tp / max(tp + fp, 1e-9)
-                #
-                #     # Recall
-                #     recall_per_class[j] += tp / max(tp + fn, 1e-9)
-                #
-                #     # F1 Score
-                #     f1_per_class[j] += 2 * (precision_per_class[j] * recall_per_class[j]) / max(
-                #         precision_per_class[j] + recall_per_class[j], 1e-9)
 
                 desc = (start_pattern + " Loss: {:.4f} ({:.4f})").format(i + 1, len_eval, losses.val, losses.avg)
                 for m in metrics:
@@ -800,25 +538,10 @@ class CDTrainer(Trainer):
                         ss = ["{}".format(m.val)]
                     desc += "{} {}".format(m.__name__, "___".join(ss))
 
-                # new_desc = (start_pattern + " Loss: {:.4f} ({:.4f})").format(i + 1, len_eval, losses.val, losses.avg)
-                # for new_m in new_metrics:
-                #     if isinstance(new_m.val, tuple):
-                #         new_ss = ["{:.4f}".format(val) for val in new_m.val]
-                #     else:
-                #         new_ss = ["{}".format(new_m.val)]
-                #     desc += "{} {}".format(new_m.__name__, "___".join(new_ss))
-
-                # desc = (start_pattern+" Loss: {:.4f} ({:.4f})").format(i+1, len_eval, losses.val, losses.avg)
-                # for m in metrics:
-                #     desc += " {} {:.4f}".format(m.__name__, m.val)
-
                 pb.set_description(desc)
-
-                # pb.set_description((new_desc))
                 dump = not self.is_training or (i % max(1, len_eval // 10) == 0)
                 if dump:
                     self.logger.dump(desc)
-                    # self.logger.dump(new_desc)
 
                 if self.tb_on:
                     if dump:
@@ -841,70 +564,9 @@ class CDTrainer(Trainer):
                     else:
                         self.eval_step += batch_size
 
-                # if (cm == 3).any():
-                #     print("有3像素")
-                # if (cm == 4).any():
-                #     print("有4像素")
-
                 if self.save:
-                    # cm_j_1_num = 0
-                    # cm_j_2_num = 0
-                    # cm_j_3_num = 0
-                    # cm_j_4_num = 0
                     for j in range(batch_size):
-                        # print(np.unique(cm[j])) # 去除重复值
-                        # if (cm[j] == 1).any():
-                        #     cm_j_1_num += 1
-                        # elif (cm[j] == 2).any():
-                        #     cm_j_2_num += 1
-                        # elif (cm[j] == 3).any():
-                        #     cm_j_3_num += 1
-                        # elif (cm[j] == 4).any():
-                        #     cm_j_4_num += 1
-                        # print(cm_j_1_num)
-                        # print(cm_j_2_num)
-                        # print(cm_j_3_num)
-                        # print(cm_j_4_num)
-
-                        # if (cm == 3).any():
-                        #     print("有3像素")
-                        # if (cm == 4).any():
-                        #     print("有4像素")
-
                         self.save_image(name[j], quantize(cm[j]), epoch)
-
-            # specificities = []
-            # sensitivities = []
-            # for i in range(4):
-            #     tn, fp, fn, tp = total_cm[i, :].ravel()
-            #     specificity = tn / (tn + fp) if tn + fp > 0 else np.nan  # 防止分母为0
-            #     sensitivity = tp / (tp + fn) if tp + fn > 0 else np.nan  # 防止分母为0
-            #     specificities.append(specificity)
-            #     sensitivities.append(sensitivity)
-
-            # print("specific:", specificities)
-            # print("sensitivity", sensitivities)
-
-            # 建立计算macro的函数
-            def calculate_macro_acc(confusion_matrix):
-                num_classes = len(confusion_matrix)
-                accuracies = []
-
-                for i in range(num_classes):
-                    tp = confusion_matrix[i][i]  # True positive
-                    fp = np.sum(confusion_matrix[:, i]) - tp  # False positive
-                    fn = np.sum(confusion_matrix[i, :]) - tp  # False negative
-                    tn = np.sum(confusion_matrix) - tp - fp - fn  # True negative
-
-                    if (tp + fp + fn + tn) == 0:
-                        accuracy = 0
-                    else:
-                        accuracy = tp / (tp + fp)
-
-                    accuracies.append(accuracy)
-
-                macro_accuracy = np.mean(accuracies)
-                return macro_accuracy
 
             # # 为了可以产生4分类的save
             # new_cm = cm
@@ -913,7 +575,7 @@ class CDTrainer(Trainer):
             # new_tar_mask = (tar > 1)
             # new_tar = tar
             # new_tar[new_tar_mask] = 2
-            #
+            
             # batch_cm = confusion_matrix((new_tar[tar != 0] - 1).ravel(), (new_cm[tar != 0] - 1).ravel())
             # # print(batch_cm)
             # if total_cm.shape == batch_cm.shape:
@@ -930,32 +592,46 @@ class CDTrainer(Trainer):
                 kappa_index = (p_o - p_e) / (1 - p_e)
 
                 return kappa_index
+            
+            def calculate_iou(cm):
+                """
+                从混淆矩阵计算每个类别的 IoU
+                :param cm: 混淆矩阵，形状为 (C, C)，其中 C 是类别数
+                :return: 每个类别的 IoU，形状为 (C,)
+                """
+                num_classes = cm.shape[0]
+                iou_list = []
+
+                for c in range(num_classes):
+                    # 计算 TP, FP, FN
+                    TP = cm[c, c]
+                    FP = np.sum(cm[:, c]) - TP  # 所有预测为 c 的样本数 - TP
+                    FN = np.sum(cm[c, :]) - TP  # 所有真实为 c 的样本数 - TP
+
+                    # 计算 IoU
+                    iou = TP / (TP + FP + FN) if (TP + FP + FN) > 0 else 0
+                    iou_list.append(iou)
+
+                return np.array(iou_list)
 
             """
             绘制confusion matrix
             """
-
             # def plt_metric(cm):
-            #
             #     import seaborn as sns
             #     import matplotlib.pyplot as plt
             #     labels = ["No Dmg.", "Minor Dmg.", "Major Dmg.", "Destroyed"]
-            #     # fig, ax = plt.subplots()
             #     sns.heatmap(cm, annot=True, cmap="Blues", fmt='.3f', xticklabels=labels, yticklabels=labels,
             #                 annot_kws={"size": 20})
-            #     # ax.set_title("Normalized Confusion Matrix")
-            #     # ax.set_xlabel("Predicted Labels")
-            #     # ax.set_ylabel("True Labels")
             #     cax = plt.gcf().axes[-1]
             #     cax.tick_params(labelsize=16)
-            #
+            
             #     plt.xticks(rotation=45, fontsize=20)
             #     plt.yticks(rotation=0, fontsize=20)
-            #     outpath = r"C:\Users\student\Desktop\归一化混淆矩阵图"
+            #     outpath = "/home/yujiaxi/DLModels/CDLab-SPAUNet-SSL/confusion_matrix"
             #     plt.savefig(os.path.join(outpath, "normalized_confusion_matrix_lunet.png"), bbox_inches="tight")
-            #
-            #     # plt.show()
-            #
+
+            
             # plt_cm_percent = plt_cm / plt_cm.sum(axis=1)[:, np.newaxis]
             # plt_metric(plt_cm_percent)
 
@@ -965,11 +641,12 @@ class CDTrainer(Trainer):
             print("recall:", recall)
             f1 = np.nan_to_num(2 * (precision * recall) / (precision + recall))
             print("f1-score:", f1)
-            # acc = calculate_macro_acc(total_cm) # 计算macro的
             acc = np.nan_to_num(np.diag(total_cm).sum() / total_cm.sum())  # 计算micro的
             print("accuracy:", acc)
             kappa_index = calculate_Kappa(total_cm)
             print("Kappa-2class:", kappa_index)
+            iou = calculate_iou(total_cm)
+            print("IoU-2class:", iou)
 
             precision_4class = np.nan_to_num(np.diag(plt_cm) / plt_cm.sum(axis=0))
             print("precision-4class:", precision_4class)
@@ -977,11 +654,12 @@ class CDTrainer(Trainer):
             print("recall-4class:", recall_4class)
             f1_4class = np.nan_to_num(2 * (precision_4class * recall_4class) / (precision_4class + recall_4class))
             print("f1-score-4class:", f1_4class)
-            # acc = calculate_macro_acc(total_cm) # 计算macro的
             acc_4class = np.nan_to_num(np.diag(plt_cm).sum() / plt_cm.sum())  # 计算micro的
             print("accuracy-4class:", acc_4class)
             kappa_index_4class = calculate_Kappa(plt_cm)
             print("Kappa-4class:", kappa_index_4class)
+            iou_4class = calculate_iou(plt_cm)
+            print("IoU-4class:", iou_4class)
 
         if self.tb_on:
             self.tb_writer.add_scalar("Eval/loss", losses.avg, self.eval_step)
@@ -989,7 +667,7 @@ class CDTrainer(Trainer):
                 self.tb_writer.add_scalar(f"Eval/{m.__name__.lower()}", m.val, self.eval_step)
             self.tb_writer.flush()
 
-        return metrics[2].val  # F1-score
+        return metrics[3].val  # F1-score
 
     def save_image(self, file_name, image, epoch):
         file_path = osp.join(
@@ -1047,7 +725,7 @@ class CDTrainer(Trainer):
 
 
 # AdaptiveDistribution 类定义
-class AdaptiveDistribution:
+class AdaptiveDistribution
     def __init__(self, buffer_size):
         self.buffer_size = buffer_size
         self.buffer = torch.zeros(buffer_size, 5)
