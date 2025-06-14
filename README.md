@@ -22,6 +22,16 @@ In `src/constants.py`, change the dataset locations to your own.
 
 In `data/xView` there are preprocessing scripts for xView datasets
 
+A few configuration files regarding different models are provided in the `configs/` folder for ease of use. *Note that the hyperparameters are not elaborately investigated to obtain a fully optimized performance.*
+
+For semi-supervised there are five hyperparameter could be selected in "config_xview.yaml":
+- Strategy1
+- Strategy2
+- Strategy3
+- Strategy4
+- None
+
+
 ### Model Training
 
 To train a model from scratch, use
